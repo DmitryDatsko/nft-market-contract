@@ -1,0 +1,30 @@
+# node_modules – пакеты, установленные через npm/yarn/pnpm
+node_modules/
+
+# логи
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# папки окружения
+.env
+.env.*.local
+
+# кеш
+.cache/
+dist/
+build/
+
+# IDE и системные файлы
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Hardhat специфичное
+artifacts/
+cache/
+typechain/
+coverage/
