@@ -55,6 +55,7 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
     );
 
     error DepositInsufficientValue(string message);
+    error NFTsNotListed(uint[] badOff, uint[] badReq);
 
     constructor() Ownable(_msgSender()) {}
 
@@ -87,27 +88,37 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
         emit Deposited(msg.sender, msg.value);
     }
 
-    function listNFT(
-        address nftContract,
-        uint256 tokenId,
-        uint256 price
+    function listNFTs(
+        address[] calldata nftContracts,
+        uint256[] calldata tokenIds,
+        uint256[] calldata prices
     ) external whenNotPaused nonReentrant {
-        require(price > 0, "Price > 0");
-
-        bytes32 key = keccak256(abi.encodePacked(nftContract, tokenId));
-        require(!listings[key].active, "Already listed");
-
-        IERC721(nftContract).transferFrom(msg.sender, address(this), tokenId);
-
-        listings[key] = Listing({
-            seller: msg.sender,
-            nftContract: nftContract,
-            tokenId: tokenId,
-            price: price,
-            active: true
-        });
-
-        emit NFTListed(msg.sender, nftContract, tokenId, price);
+        uint len = nftContracts.length;
+        require(
+            len > 0 && len == tokenIds.length && len == prices.length,
+            "Array mismatch"
+        );
+        for (uint i = 0; i < len; i++) {
+            uint256 price = prices[i];
+            require(price > 0, "Price>0");
+            address nftContract = nftContracts[i];
+            uint256 tokenId = tokenIds[i];
+            bytes32 key = keccak256(abi.encodePacked(nftContract, tokenId));
+            require(!listings[key].active, "Already listed");
+            IERC721(nftContract).transferFrom(
+                msg.sender,
+                address(this),
+                tokenId
+            );
+            listings[key] = Listing({
+                seller: msg.sender,
+                nftContract: nftContract,
+                tokenId: tokenId,
+                price: price,
+                active: true
+            });
+            emit NFTListed(msg.sender, nftContract, tokenId, price);
+        }
     }
 
     function updatePrice(
@@ -128,40 +139,71 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
         emit PriceUpdated(msg.sender, nftContract, tokenId, old, newPrice);
     }
 
-    function cancelListing(
-        address nftContract,
-        uint256 tokenId
+    function cancelListings(
+        address[] calldata nftContracts,
+        uint256[] calldata tokenIds
     ) external whenNotPaused nonReentrant {
-        bytes32 key = keccak256(abi.encodePacked(nftContract, tokenId));
-        Listing storage lst = listings[key];
-
-        require(lst.active, "Not listed");
-        require(lst.seller == msg.sender, "Not seller");
-
-        lst.active = false;
-        IERC721(nftContract).transferFrom(address(this), msg.sender, tokenId);
-
-        emit NFTDelisted(msg.sender, nftContract, tokenId);
+        uint len = nftContracts.length;
+        require(len > 0 && len == tokenIds.length, "Array mismatch");
+        uint256[] memory badIds = new uint256[](len);
+        uint badCount;
+        for (uint i = 0; i < len; i++) {
+            bytes32 key = keccak256(
+                abi.encodePacked(nftContracts[i], tokenIds[i])
+            );
+            Listing storage lst = listings[key];
+            if (!lst.active || lst.seller != msg.sender) {
+                badIds[badCount++] = tokenIds[i];
+            }
+        }
+        if (badCount > 0) {
+            revert NFTsNotListed(badIds, new uint256[](0));
+        }
+        for (uint i = 0; i < len; i++) {
+            address nftContract = nftContracts[i];
+            uint256 tokenId = tokenIds[i];
+            bytes32 key = keccak256(abi.encodePacked(nftContract, tokenId));
+            listings[key].active = false;
+            IERC721(nftContract).transferFrom(
+                address(this),
+                msg.sender,
+                tokenId
+            );
+            emit NFTDelisted(msg.sender, nftContract, tokenId);
+        }
     }
 
-    function buyNFT(
-        address nftContract,
-        uint256 tokenId
+    function buyNFTs(
+        address[] calldata nftContracts,
+        uint256[] calldata tokenIds
     ) external payable whenNotPaused nonReentrant {
-        bytes32 key = keccak256(abi.encodePacked(nftContract, tokenId));
-        Listing storage lst = listings[key];
-
-        require(lst.active, "Not for sale");
-        require(msg.value == lst.price, "Wrong ETH amount");
-
-        lst.active = false;
-
-        (bool sent, ) = payable(lst.seller).call{value: msg.value}("");
-        require(sent, "Payment failed");
-
-        IERC721(nftContract).transferFrom(address(this), msg.sender, tokenId);
-
-        emit NFTPurchased(msg.sender, nftContract, tokenId, lst.price);
+        uint len = nftContracts.length;
+        require(len > 0 && len == tokenIds.length, "Array mismatch");
+        uint256 totalPrice;
+        for (uint i = 0; i < len; i++) {
+            bytes32 key = keccak256(
+                abi.encodePacked(nftContracts[i], tokenIds[i])
+            );
+            Listing storage lst = listings[key];
+            require(lst.active, "Not for sale");
+            totalPrice += lst.price;
+        }
+        require(msg.value == totalPrice, "Wrong ETH amount");
+        for (uint i = 0; i < len; i++) {
+            address nftContract = nftContracts[i];
+            uint256 tokenId = tokenIds[i];
+            bytes32 key = keccak256(abi.encodePacked(nftContract, tokenId));
+            Listing storage lst = listings[key];
+            lst.active = false;
+            (bool sent, ) = payable(lst.seller).call{value: lst.price}("");
+            require(sent, "Payment failed");
+            IERC721(nftContract).transferFrom(
+                address(this),
+                msg.sender,
+                tokenId
+            );
+            emit NFTPurchased(msg.sender, nftContract, tokenId, lst.price);
+        }
     }
 
     function _collectAndDeactivate(
@@ -201,16 +243,53 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
             "Arrays mismatch"
         );
 
-        uint totalOff = _collectAndDeactivate(
-            offeredContracts,
-            offeredTokenIds,
-            true
-        );
-        uint totalReq = _collectAndDeactivate(
-            requestedContracts,
-            requestedTokenIds,
-            false
-        );
+        uint offLen = offeredContracts.length;
+        uint reqLen = requestedContracts.length;
+        uint[] memory badOff = new uint[](offLen);
+        uint[] memory badReq = new uint[](reqLen);
+        uint offCount = 0;
+        uint reqCount = 0;
+        for (uint i = 0; i < offLen; i++) {
+            bytes32 key = keccak256(
+                abi.encodePacked(offeredContracts[i], offeredTokenIds[i])
+            );
+            Listing storage lst = listings[key];
+            if (!lst.active || lst.seller != msg.sender) {
+                badOff[offCount++] = offeredTokenIds[i];
+            }
+        }
+        for (uint i = 0; i < reqLen; i++) {
+            bytes32 key = keccak256(
+                abi.encodePacked(requestedContracts[i], requestedTokenIds[i])
+            );
+            Listing storage lst = listings[key];
+            if (!lst.active || lst.seller == msg.sender) {
+                badReq[reqCount++] = requestedTokenIds[i];
+            }
+        }
+        if (offCount > 0 || reqCount > 0) {
+            revert NFTsNotListed(badOff, badReq);
+        }
+
+        uint totalOff;
+        for (uint i = 0; i < offLen; i++) {
+            bytes32 key = keccak256(
+                abi.encodePacked(offeredContracts[i], offeredTokenIds[i])
+            );
+            Listing storage lst = listings[key];
+            totalOff += lst.price;
+            lst.active = false;
+        }
+
+        uint totalReq;
+        for (uint i = 0; i < reqLen; i++) {
+            bytes32 key = keccak256(
+                abi.encodePacked(requestedContracts[i], requestedTokenIds[i])
+            );
+            Listing storage lst = listings[key];
+            totalReq += lst.price;
+            lst.active = false;
+        }
 
         uint extra = totalReq > totalOff ? totalReq - totalOff : 0;
         uint surplus = totalOff > totalReq ? totalOff - totalReq : 0;
@@ -222,7 +301,7 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
             _balances[msg.sender] -= (extra - msg.value);
         }
 
-        for (uint i = 0; i < requestedContracts.length; i++) {
+        for (uint i = 0; i < reqLen; i++) {
             bytes32 key = keccak256(
                 abi.encodePacked(requestedContracts[i], requestedTokenIds[i])
             );
@@ -236,7 +315,7 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
             );
         }
 
-        for (uint i = 0; i < offeredContracts.length; i++) {
+        for (uint i = 0; i < offLen; i++) {
             bytes32 key = keccak256(
                 abi.encodePacked(offeredContracts[i], offeredTokenIds[i])
             );
