@@ -1,28 +1,33 @@
+require("dotenv").config();
 require("@nomicfoundation/hardhat-toolbox");
+require("@nomicfoundation/hardhat-ignition-ethers");
+
+const { PRIVATE_KEY = "" } = process.env;
 
 module.exports = {
     solidity: {
-        compilers: [
-            {
-                version: "0.8.28",
-                settings: {
-                    viaIR: true,
-                    optimizer: {
-                        enabled: true,
-                        runs: 200
-                    }
-                }
+        version: "0.8.28",
+        settings: {
+            metadata: {
+                bytecodeHash: "none", // disable ipfs
+                useLiteralContent: true, // use source code
             },
-            {
-                version: "0.8.9",
-                settings: {
-                    viaIR: true,
-                    optimizer: {
-                        enabled: true,
-                        runs: 200
-                    }
-                }
-            }
-        ]
-    }
+        },
+    },
+    networks: {
+        monadTestnet: {
+            url: "https://testnet-rpc.monad.xyz",
+            accounts: [PRIVATE_KEY],
+            chainId: 10143,
+        },
+    },
+    sourcify: {
+        enabled: true,
+        apiUrl: "https://sourcify-api-monad.blockvision.org",
+        browserUrl: "https://testnet.monadexplorer.com",
+    },
+    // To avoid errors from Etherscan
+    etherscan: {
+        enabled: false,
+    },
 };

@@ -15,6 +15,13 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
         uint256 price;
         bool active;
     }
+    struct TradeVars {
+        uint256 offLen;
+        uint256 reqLen;
+        uint256 totalOff;
+        uint256 totalReq;
+    }
+
     mapping(bytes32 => Listing) public listings;
     mapping(address => uint256) private _balances;
 
@@ -61,7 +68,12 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
 
     receive() external payable {}
 
-    fallback() external payable {}
+    function _makeKey(
+        address contractAddr,
+        uint256 tokenId
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(contractAddr, tokenId));
+    }
 
     function pause() external onlyOwner whenNotPaused {
         _pause();
@@ -206,24 +218,55 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
         }
     }
 
-    function _collectAndDeactivate(
-        address[] calldata contracts,
-        uint256[] calldata tokenIds,
-        bool isOffered
-    ) private returns (uint total) {
-        for (uint i = 0; i < contracts.length; i++) {
-            bytes32 key = keccak256(
-                abi.encodePacked(contracts[i], tokenIds[i])
-            );
+    function validateOffers(
+        address[] calldata offersC,
+        uint256[] calldata offersT
+    ) private view {
+        for (uint256 i = 0; i < offersC.length; i++) {
+            Listing storage lst = listings[_makeKey(offersC[i], offersT[i])];
+            require(lst.active, "Offer not listed");
+            require(lst.seller == msg.sender, "Not offer owner");
+        }
+    }
+
+    function validateRequests(
+        address[] calldata reqC,
+        uint256[] calldata reqT
+    ) private view {
+        for (uint256 i = 0; i < reqC.length; i++) {
+            Listing storage lst = listings[_makeKey(reqC[i], reqT[i])];
+            require(lst.active, "Request not listed");
+            require(lst.seller != msg.sender, "Request owned by you");
+        }
+    }
+
+    function settleTrades(
+        address[] calldata offersC,
+        uint256[] calldata offersT,
+        address[] calldata reqC,
+        uint256[] calldata reqT,
+        TradeVars memory v,
+        uint256 extra
+    ) private {
+        for (uint256 i = 0; i < v.reqLen; i++) {
+            bytes32 key = _makeKey(reqC[i], reqT[i]);
             Listing storage lst = listings[key];
-            require(lst.active, "Not listed");
-            if (isOffered) {
-                require(lst.seller == msg.sender, "Not owner");
-            } else {
-                require(lst.seller != msg.sender, "Self-trade");
-            }
-            total += lst.price;
             lst.active = false;
+            uint256 pay = lst.price +
+                (extra > 0 ? (lst.price * extra) / v.totalReq : 0);
+            (bool ok, ) = payable(lst.seller).call{value: pay}("");
+            require(ok, "Pay fail");
+            IERC721(reqC[i]).transferFrom(address(this), msg.sender, reqT[i]);
+        }
+        for (uint256 i = 0; i < v.offLen; i++) {
+            bytes32 key = _makeKey(offersC[i], offersT[i]);
+            Listing storage lst = listings[key];
+            lst.active = false; // already deactivated, but safe
+            IERC721(offersC[i]).transferFrom(
+                address(this),
+                lst.seller,
+                offersT[i]
+            );
         }
     }
 
@@ -233,66 +276,34 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
         address[] calldata requestedContracts,
         uint256[] calldata requestedTokenIds
     ) external payable whenNotPaused nonReentrant {
+        TradeVars memory v;
+        v.offLen = offeredContracts.length;
+        v.reqLen = requestedContracts.length;
+        require(v.offLen > 0 && v.reqLen > 0, "Empty arrays");
         require(
-            offeredContracts.length > 0 && requestedContracts.length > 0,
-            "Empty arrays"
-        );
-        require(
-            offeredContracts.length == offeredTokenIds.length &&
-                requestedContracts.length == requestedTokenIds.length,
-            "Arrays mismatch"
+            v.offLen == offeredTokenIds.length &&
+                v.reqLen == requestedTokenIds.length,
+            "Array mismatch"
         );
 
-        uint offLen = offeredContracts.length;
-        uint reqLen = requestedContracts.length;
-        uint[] memory badOff = new uint[](offLen);
-        uint[] memory badReq = new uint[](reqLen);
-        uint offCount = 0;
-        uint reqCount = 0;
-        for (uint i = 0; i < offLen; i++) {
-            bytes32 key = keccak256(
-                abi.encodePacked(offeredContracts[i], offeredTokenIds[i])
-            );
-            Listing storage lst = listings[key];
-            if (!lst.active || lst.seller != msg.sender) {
-                badOff[offCount++] = offeredTokenIds[i];
-            }
+        validateOffers(offeredContracts, offeredTokenIds);
+        validateRequests(requestedContracts, requestedTokenIds);
+
+        for (uint256 i = 0; i < v.offLen; i++) {
+            Listing storage lst = listings[
+                _makeKey(offeredContracts[i], offeredTokenIds[i])
+            ];
+            v.totalOff += lst.price;
         }
-        for (uint i = 0; i < reqLen; i++) {
-            bytes32 key = keccak256(
-                abi.encodePacked(requestedContracts[i], requestedTokenIds[i])
-            );
-            Listing storage lst = listings[key];
-            if (!lst.active || lst.seller == msg.sender) {
-                badReq[reqCount++] = requestedTokenIds[i];
-            }
-        }
-        if (offCount > 0 || reqCount > 0) {
-            revert NFTsNotListed(badOff, badReq);
+        for (uint256 i = 0; i < v.reqLen; i++) {
+            Listing storage lst = listings[
+                _makeKey(requestedContracts[i], requestedTokenIds[i])
+            ];
+            v.totalReq += lst.price;
         }
 
-        uint totalOff;
-        for (uint i = 0; i < offLen; i++) {
-            bytes32 key = keccak256(
-                abi.encodePacked(offeredContracts[i], offeredTokenIds[i])
-            );
-            Listing storage lst = listings[key];
-            totalOff += lst.price;
-            lst.active = false;
-        }
-
-        uint totalReq;
-        for (uint i = 0; i < reqLen; i++) {
-            bytes32 key = keccak256(
-                abi.encodePacked(requestedContracts[i], requestedTokenIds[i])
-            );
-            Listing storage lst = listings[key];
-            totalReq += lst.price;
-            lst.active = false;
-        }
-
-        uint extra = totalReq > totalOff ? totalReq - totalOff : 0;
-        uint surplus = totalOff > totalReq ? totalOff - totalReq : 0;
+        uint256 extra = v.totalReq > v.totalOff ? v.totalReq - v.totalOff : 0;
+        uint256 surplus = v.totalOff > v.totalReq ? v.totalOff - v.totalReq : 0;
         require(
             msg.value + _balances[msg.sender] >= extra,
             "Insufficient funds"
@@ -301,43 +312,27 @@ contract Main is Ownable, Pausable, ReentrancyGuard {
             _balances[msg.sender] -= (extra - msg.value);
         }
 
-        for (uint i = 0; i < reqLen; i++) {
-            bytes32 key = keccak256(
-                abi.encodePacked(requestedContracts[i], requestedTokenIds[i])
-            );
-            Listing memory lst = listings[key];
-            uint share = extra > 0 ? (lst.price * extra) / totalReq : 0;
-            payable(lst.seller).transfer(lst.price + share);
-            IERC721(requestedContracts[i]).transferFrom(
-                address(this),
-                msg.sender,
-                requestedTokenIds[i]
-            );
-        }
-
-        for (uint i = 0; i < offLen; i++) {
-            bytes32 key = keccak256(
-                abi.encodePacked(offeredContracts[i], offeredTokenIds[i])
-            );
-            Listing memory lst = listings[key];
-            IERC721(offeredContracts[i]).transferFrom(
-                address(this),
-                lst.seller,
-                offeredTokenIds[i]
-            );
-        }
+        settleTrades(
+            offeredContracts,
+            offeredTokenIds,
+            requestedContracts,
+            requestedTokenIds,
+            v,
+            extra
+        );
 
         if (surplus > 0) {
             _balances[msg.sender] += surplus;
         }
+
         emit NFTsTraded(
             msg.sender,
             offeredContracts,
             offeredTokenIds,
             requestedContracts,
             requestedTokenIds,
-            totalOff,
-            totalReq,
+            v.totalOff,
+            v.totalReq,
             extra
         );
     }
